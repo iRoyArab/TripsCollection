@@ -1,0 +1,1130 @@
+import os
+import re
+import pandas as pd
+import dash
+import dash_bootstrap_components as dbc
+import plotly.express as px
+import plotly.graph_objects as go
+
+from pathlib import Path
+from dash import dcc, html, Input, Output, State
+from dash.exceptions import PreventUpdate
+
+
+# Initialize the app
+csv_file_path = "Trip_Collection.csv"
+if not os.path.exists(csv_file_path):
+    # If the file doesn't exist, create it with the default columns
+    df = pd.DataFrame(columns=[
+        "Trip", "Coordinates", "Area", "Accessibility", "Challenge",
+        "Terrain", "View", "Shade", "Water", "Trail Length", "Required Equipment",
+        "Weather", "Crowdness", "Nearby Attractions", "Entry Fee", "Distance", "Total Score"
+    ])
+    df.to_csv(csv_file_path, index=True)
+else:
+    df = pd.read_csv(csv_file_path,index_col=0)
+
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+
+def compute_valid_score_count (df):
+    if not df.empty:
+        if "Total Score" in df:
+            scores = pd.to_numeric(df["Total Score"], errors='coerce')
+            valid_score_count = scores[scores.notnull()].count()
+        else:
+            valid_score_count = 0
+    else:
+        valid_score_count=0
+    return valid_score_count
+
+"""
+Trips Calculation
+
+------------------------------------------------------------------------------------------------------------------------------------------------
+
+"""
+
+def trip_name_val(trip, df):
+    if not trip:
+        raise ValueError("Please insert a valid trip name.")
+    elif os.path.exists(csv_file_path):
+            if not df.empty:    
+                if trip in df["Trip"].values:
+                    raise ValueError("This trip is already in the data!")
+    return trip
+
+def mid_trail_coordinate(coord, df):
+    if not coord:
+        raise ValueError("Please insert a coordinate!")
+    elif os.path.exists(csv_file_path):
+            if not df.empty:  
+                if coord in df["Coordinates"].values:
+                    raise ValueError("This coordinate is already in another trip!")
+    elif "," not in coord:
+        raise ValueError("Invalid coordinate string, a comma is missing")   
+    return coord
+ 
+
+# Dictionaries for scoring
+area_scores = {
+    "Golan Heights - North-East Galilee": 10,
+    "Golan Heights": 9.5,
+    "Upper Galilee": 9.25,
+    "Galilee Center & The Kinerret":9,
+    "Lower Galilee": 8.75,
+    "Carmel Mountains": 8.25,
+    "Jerusalem Mountains": 8,
+    "The Shfela Mountains": 7.5,
+    "Eilat Mountains": 7,
+    "The Dead Sea Mountains": 6.75,
+    "South Negev Mountains": 6.5,
+    "Arava Mountains": 6,
+    "Northern Negav": 5,
+    "Judea & Samaria Area": 4,
+    "The Northen Coastal Plain": 3.5,
+    "The Center Coastal Plain": 3,
+    "The South Coastal Plain": 2.5
+}
+
+Accessibility = {
+    "Open to All": 10,
+    "Open, But with Army Coordination": 7.5, 
+    "Open Most of The Time, with Some Exceptions": 6,
+    "Closed Most of The Time, with Some Exceptions": 4.5,
+    "A Restricted Military Zone": 0,
+}
+
+Challenge = {
+    "Very Challenging, with Lots of Obstacles in The Way": 10,
+    "There's Some Challenge, but Most of it is in Average Challenge": 8,
+    "There's some challenge, but Most of The Trail is Easy": 6.5,
+    "Medium Challenge": 5,
+    "Easy-Medium": 3.5,   
+    "Easy": 2,   
+    "No Challenge At All!": 0
+}
+
+Terrain = {
+    "Mountainous region with lots of rivers and creeks": 10,
+    "Mostly rivers, with some steep hills": 8,
+    "Mostly high plattos, with some creeks": 6,
+    "A coastly region, with some rivers": 5,
+    "A plain area with some rivers and hills": 4,
+    "A whole plain area": 2
+}
+
+View = {
+    "Snowy mountains, lucious springs and rivers, lots of meadows and green": 13,
+    "Vivid green mountains, lots of streams, and rocks": 10,
+    "Bared Mountains with lots of flowing rivers": 8,
+    "Bared Mountains & Dry Rivers": 7,
+    "Bared Mountains, but no rivers nearby": 6,
+    "Deset mountains with some creeks": 5,
+    "coastal area, shores and sea": 4,
+    "Urbanic View": 2
+}
+
+Shade= {
+    "Mostly shaded, cooled and glimpses of sunshine occasionally": 10,
+    "Fully shaded": 9,
+    "Mostly shaded, but could be parts exposed to light": 8,
+    "Half shaded, half exposed to sunlight": 6,
+    "Most of it exposed to sunlight, occasionally shaded": 4,
+    "Fully exposed to sunlight": 2
+}
+
+Entry_Fee = {
+"Free of charge": 10,
+"Free for most of the trail. with some unique locations for extra charge": 8,
+"Low-Medium charge, worths the money": 7,
+"Low-Medium charge, doesn't worth the money": 5.5,
+"High charge, but worth the money": 4,
+"High, mendatory and nothing special":0
+}
+
+Water = {
+"Plenty of water, easy access, with an arranged entrance and many water activities in place": 13,
+"Lots of water, with several entrances, easy access": 10,
+"Some locations rich in waterfalls and pools, with many entry points throught the trail": 9,
+"Lots of locations with water along the trail, but hard to reach easily": 7.5,
+"Few points with water along the trail, not an easy access": 6,
+"Lots of points with dry, dirty pools along the way": 3,
+"Few points with even less water in them": 1.5,
+"None": 0
+}
+
+Nearby_attractions = {
+    "Full of attractions nearby: wineries, viewpoints, food, pubs and resorts": 10,
+    "Some attractions along the way, mostly wineries and restaurants": 8,
+    "Few attractions nearby, mostly restaurants and hostels": 6,
+    "One restaurant & hostel 50KM from the trail": 5,
+    "One winery 50KM from the trail": 4,
+    "Nothing special within 80KM from the trail": 2,
+    "None": 0
+}
+
+Trail_length = {
+"10KM, an average of 4-5 walking hours": 10,
+"7-9KM, an average of 3.5-4.5 walking hours": 9,
+"5-7KM, an average of 2.5-3.5 walking hours": 7.5,
+"14-15KM, extensive daytrip, an average of 6-7 walking hours": 7,
+"3-5KM, an average of 1.5-2.5 walking hours": 6,
+"19-20KM, a full day of walking, about 8-9 walking hours": 5.5,
+"Higher than 20KM, more than 9 walking hours": 4,
+"2-3KM, about 1 walking hours": 2,
+"1-2KM, less than half an hour": 0
+}
+
+How_far_from_me = {
+"Half an hour drive": 10,
+"1 drive hour": 8.5,
+"1.5-2 drive hours": 7,
+"2.5 drive hours": 6,
+"2.5-3 drive hours": 4,
+"3.5 drive hours": 3,
+"3.5-4 drive hours": 2,
+"More than 4 drive hours": 0
+}
+
+Required_eq = {
+"Only a small bag with 1.5 liter bottle. hat, casual clothing": 10,
+"Could be a small bag, but packed with 3 liter of water, and food, casual clothing": 8.5,
+"Could be casual clothing, but must have a professional day-trip bagpack, with a hydration pack, small botlle, food and first-aid kit": 7,
+"Hiking clothing required, with a good pack and trekking poles": 6.5,
+"Hiking clothing, a fully load day-trip backpack, with 6 liter of water, kooking kit, food, first-aid kit": 5.5,
+"Fully equipped for a daytrip, including trekking poles": 4,
+"A professional hiking clothing, fully loaded 60 liter professional bagpack": 2.5,
+}
+
+Weather = {
+"Clear, an average of 18-20C": 10,
+"Clear, an average of 22-25C": 9,
+"Cloudly with some rain and snow, 8-10C": 8.5,
+"Cloudly, but dry with 17-20C": 8,
+"Cloudly with light rain, 16-18C": 7.5,
+"Clear, 27-30C": 6,
+"Cloudly with heavy rain, 23-25C": 5,
+"Cloudly with heavy rain, lower then 15C": 3,
+"Clear, 35-40C": 1.5,
+"Lower than 8C or Higher than 40C": 0
+}
+
+Crowdness = {
+"Not crowded at all": 10,
+"Some hikers along the way, not really affecting the experience": 8.5,
+"Lots of hikers along the trail": 7,
+"Many families along the way, but there's still enough room for all": 6,
+"Not so many people along the way, but feels very crowded": 3,
+"Too many hikers, families and waste along the way, almost can't move": 0 
+}
+
+background_style = {
+    "background-image": "url('https://i.pinimg.com/1200x/84/fc/4f/84fc4f5e96fb154114f8c3c686848af2.jpg')",
+    "background-size": "cover",
+    "background-position": "center",
+     "background-repeat": "no-repeat",
+    "height": "120vh",
+    "padding": "10px",
+}
+
+container_style = {
+    "background-color": "rgba(255, 255, 255, 0.8)",
+    "border-radius": "50px",
+    "padding": "15px",
+    "box-shadow": "0px 8px 20px rgba(0, 0, 0, 0.3)",
+    "width": "95%",
+    "max-width": "1600px",
+    "margin": "0 auto",
+}
+
+tab_style = {
+    "background-color": "rgba(255, 255, 255, 0.5)",
+    "background-image": "url('https://i.pinimg.com/1200x/84/fc/4f/84fc4f5e96fb154114f8c3c686848af2.jpg')",
+    "background-size": "cover",
+    "background-position": "top",
+    "background-repeat": "no-repeat",
+    'color': 'black',
+    'font-size': '24px',
+    
+}
+
+selected_tab_style = {
+    "background-image": "url('https://media.istockphoto.com/id/688429288/photo/its-not-an-experience-if-you-cant-share-it.jpg?s=2048x2048&w=is&k=20&c=Tc71AeWSJBXqAWI4Xbji5eXNvCt1cNj0yUyBrBhlXiE=')",
+    'color': 'black',
+    'font-size': '24px',
+    'padding': '10px',
+    'font-weight': 'bold'
+}
+
+heading_style = {
+    "text-align": "center",
+    "font-family": "Arial, sans-serif",
+    "color": "#2C3E50",
+    "margin-bottom": "20px",
+}
+
+button_style = {
+    "width": "40%",
+    "height": "80px",
+    "margin": "40px auto auto -350px",
+    "background-color": "#3498DB",
+    "color": "black",
+    "border": "2px solid black",
+    "display": "block",
+    "font-weight": "bold",
+}
+
+button_style1 = {
+    "width": "26%",
+    "height": "60px",
+    "margin": "10px ",
+    "background-color": "green",
+    "border": "2px solid black",
+    "font-weight": "bold",
+    "color": "white",
+    "textAlign": "left",
+}
+
+button_style_2 = {
+    "width": "30%",
+    "height": "60px",
+    "margin": "100px auto auto auto",
+    "background-color": "red",
+    "border": "2px solid black",
+    "font-weight": "bold",
+    "color": "yellow",
+    "textAlign": "center",
+    "display": "block",
+}
+
+button_style3 = {
+    "width": "26%",
+    "height": "60px",
+    "margin": "50px 0 50px auto ",
+    "background-color": "orange",
+    "border": "2px solid black",
+    "font-weight": "bold",
+    "color": "white",
+    "textAlign": "center",
+}
+
+font_style = {
+     "font-weight": "bold",
+}
+
+output_style = {
+    "margin-top": "30px",
+    "font-family": "David, sans-serif",
+    "color": "#2C3E50",
+    "padding": "10px",
+    "font-size": "25px",
+}
+
+def tab1_layout():
+    return html.Div(
+        style=background_style,
+        children=[
+            dcc.Interval(id='interval-component', interval=1 * 1000, n_intervals=0),
+            dcc.Store(id='df-store'),  # Store to hold DataFrame data
+            dcc.Store(id='default-values', data={
+                'trip': "",
+                'mid_trail_coordinate': "",
+                'area_scores': "Golan Heights - North-East Galilee",
+                'Accessibility': "Open to All",
+                'Challenge': "Very Challenging, with Lots of Obstacles in The Way",
+                'terrain': "Mountainous region with lots of rivers and creeks",
+                'view': "Vivid green mountains, lots of streams, and rocks",
+                'shade': "Mostly shaded, cooled and glimpses of sunshine occasionally",
+                'Entry_Fee': "Free of charge",
+                'water': "Lots of water, with several entrances, easy access",
+                'nearby_attractions': "Full of attractions nearby: wineries, viewpoints, food, pubs and resorts",
+                'trail_length': "10KM, an average of 4-5 walking hours",
+                'how_far_from_me': "Half an hour drive",
+                'required_eq': "Only a small bag with 1.5 liter bottle. hat, casual clothing",
+                'weather': "Clear, an average of 18-20C",
+                'crowdness': "Not crowded at all"
+            }),
+
+            dbc.Container(
+                style=container_style,
+                children=[
+                    html.H1("Trip Evaluation Application", style=heading_style),
+                    html.Hr(),
+                    dbc.Row(
+                        [
+                            dbc.Col(
+                                [
+                                    html.H5("Name & Location"),
+                                    dbc.Label("Trip Name:"),
+                                    dcc.Input(id='trip_name', type='text', value="", className="form-control"),
+                                    dbc.Label("Coordinate:"),
+                                    dcc.Input(id='coordinate', type='text', value="", className="form-control"),
+                                    html.Br(),
+                                    dbc.Label("Travel Area:"),
+                                    dcc.Dropdown(
+                                        id='area',
+                                        options=[{'label': k, 'value': k} for k in area_scores.keys()],
+                                        value="Golan Heights - North-East Galilee",
+                                        className="form-control"
+                                    ),
+                                    html.Br(),
+                                    dbc.Label("Accessibility:"),
+                                    dcc.Dropdown(
+                                        id='accessibility',
+                                        options=[{'label': k, 'value': k} for k in Accessibility.keys()],
+                                        value="Open to All",
+                                        className="form-control"
+                                    ),
+                                    dcc.Markdown(
+                                        id='trips_count',
+                                        children="### Trip Evaluation Count\nThere are **0** trips.",
+                                        style={'fontSize': '24px', 'marginTop': '100px', 'textAlign': 'left'}
+                                    ),
+                                    html.Br(),
+                                    dcc.Markdown(
+                                        id='Remove_trip',
+                                        children="### Remove a trip",
+                                        style={'fontSize': '24px', 'marginTop': '20px', 'textAlign': 'left'}
+                                    ),
+                                    dcc.Dropdown(
+                                        id='trips_list',
+                                        options=[],
+                                        value= None,
+                                        className="form-control"
+                                    ),
+                                    dbc.Button("Remove", id='remove_btn', color='success', n_clicks=0, style=button_style3),
+                                    dcc.ConfirmDialog(
+                                        id='confirm_remove_trip',
+                                        message="Are you sure you want to remove this trip? This action cannot be undone.",
+                                    ),
+                                ],
+                                width=4
+                            ),
+                            dbc.Col(
+                                [
+                                    html.H5("Trail Features"),
+                                    dbc.Label("Challenge:"),
+                                    dcc.Dropdown(
+                                        id='challenge',
+                                        options=[{'label': c, 'value': c} for c in Challenge.keys()],
+                                        value="Very Challenging, with Lots of Obstacles in The Way",
+                                        className="form-control"
+                                    ),
+                                    html.Br(),
+                                    dbc.Label("Terrain:"),
+                                    dcc.Dropdown(
+                                        id='terrain',
+                                        options=[{'label': k, 'value': k} for k in Terrain.keys()],
+                                        value="Mountainous region with lots of rivers and creeks",
+                                        className="form-control"
+                                    ),
+                                    html.Br(),
+                                    dbc.Label("View:"),
+                                    dcc.Dropdown(
+                                        id='view',
+                                        options=[{'label': k, 'value': k} for k in View.keys()],
+                                        value="Vivid green mountains, lots of streams, and rocks",
+                                        className="form-control"
+                                    ),
+                                    html.Br(),
+                                    dbc.Label("How Shaded?"),
+                                    dcc.Dropdown(
+                                        id='shade',
+                                        options=[{'label': k, 'value': k} for k in Shade.keys()],
+                                        value="Mostly shaded, cooled and glimpses of sunshine occasionally",
+                                        className="form-control"
+                                    ),
+                                    html.Br(),
+                                    dbc.Label("Water:"),
+                                    dcc.Dropdown(
+                                        id='water',
+                                        options=[{'label': k, 'value': k} for k in Water.keys()],
+                                        value="Lots of water, with several entrances, easy access",
+                                        className="form-control"
+                                    ),
+                                    html.Br(),
+                                    dbc.Label("Trail Length:"),
+                                    dcc.Dropdown(
+                                        id='trail_length',
+                                        options=[{'label': k, 'value': k} for k in Trail_length.keys()],
+                                        value="10KM, an average of 4-5 walking hours",
+                                        className="form-control"
+                                    ),
+                                    html.Br(),
+                                    dbc.Label("Required Equipment:"),
+                                    dcc.Dropdown(
+                                        id='required_eq',
+                                        options=[{'label': k, 'value': k} for k in Required_eq.keys()],
+                                        value="Only a small bag with 1.5 liter bottle. hat, casual clothing",
+                                        className="form-control"
+                                    ),
+                                ],
+                                width=4
+                            ),
+                            dbc.Col(
+                                [
+                                    html.H5("General Conditions"),
+                                    dbc.Label("Weather:"),
+                                    dcc.Dropdown(
+                                        id='weather',
+                                        options=[{'label': k, 'value': k} for k in Weather.keys()],
+                                        value="Clear, an average of 18-20C",
+                                        className="form-control"
+                                    ),
+                                    html.Br(),
+                                    dbc.Label("Crowdness:"),
+                                    dcc.Dropdown(
+                                        id='crowdness',
+                                        options=[{'label': k, 'value': k} for k in Crowdness.keys()],
+                                        value="Not crowded at all",
+                                        className="form-control"
+                                    ),
+                                    html.Br(),
+                                    dbc.Label("Nearby Attractions:"),
+                                    dcc.Dropdown(
+                                        id='nearby',
+                                        options=[{'label': k, 'value': k} for k in Nearby_attractions.keys()],
+                                        value="Full of attractions nearby: wineries, viewpoints, food, pubs and resorts",
+                                        className="form-control"
+                                    ),
+                                    html.Br(),
+                                    dbc.Label("Entry Fee:"),
+                                    dcc.Dropdown(
+                                        id='Entry_Fee',
+                                        options=[{'label': k, 'value': k} for k in Entry_Fee.keys()],
+                                        value="Free of charge",
+                                        className="form-control"
+                                    ),
+                                    html.Br(),
+                                    dbc.Label("How Far Is It?"),
+                                    dcc.Dropdown(
+                                        id='how_far_from_me',
+                                        options=[{'label': k, 'value': k} for k in How_far_from_me.keys()],
+                                        value="Half an hour drive",
+                                        className="form-control"
+                                    ),
+                                    dbc.Button("Remove DataFrame", id='reset-btn', color='primary', n_clicks=0, style=button_style_2),
+                                    html.Br(),
+                                    dbc.Button("Calculate Score", id='calculate-btn', color='primary', n_clicks=0, style=button_style),
+                                    dcc.ConfirmDialog(
+                                        id='confirm_reset',
+                                        message="Are you sure you want to clear the DataFrame? This action cannot be undone.",
+                                    ),
+                                    dbc.Modal(
+                                        [
+                                            dbc.ModalHeader("Trip Score"),
+                                            dbc.ModalBody(id="modal-body"),
+                                        ],
+                                        id="score-modal",
+                                        is_open=False,
+                                    ),
+                                ]
+                            )
+                        ]
+                    )
+                ]
+            )
+        ]
+    )
+
+def exclude_empty_all_na(df):
+    """
+    Exclude columns that are entirely empty or contain only NA values.
+    """
+    return df.dropna(axis=1, how='all')
+
+@app.callback(
+    [
+        Output("modal-body", "children"),
+        Output("score-modal", "is_open"),
+        Output("confirm_reset", "displayed"),
+        Output('trips_count', 'children'),
+        Output("confirm_remove_trip", "displayed"),
+        Output("trips_list","options"),
+        Output("trips_list", "value"),
+        Output("trip_name", "value"),
+        Output("coordinate", "value"),
+        Output("area", "value"),
+        Output("accessibility", "value"),
+        Output("challenge", "value"),
+        Output("terrain", "value"),
+        Output("view", "value"),
+        Output("shade", "value"),
+        Output("water", "value"),
+        Output("trail_length", "value"),
+        Output("required_eq", "value"),
+        Output("weather", "value"),
+        Output("crowdness", "value"),
+        Output("nearby", "value"),
+        Output("Entry_Fee", "value"),
+        Output("how_far_from_me", "value")
+    ],
+    [
+        Input("calculate-btn", "n_clicks"),
+        Input("confirm_remove_trip","submit_n_clicks"),
+        Input("remove_btn", "n_clicks"),
+        Input("confirm_reset","submit_n_clicks"),
+        Input("reset-btn", "n_clicks"),
+        Input('interval-component', 'n_intervals')
+    ],
+    [
+        State("trip_name", "value"),
+        State("coordinate", "value"),
+        State("area", "value"),
+        State("accessibility", "value"),
+        State("challenge", "value"),
+        State("terrain", "value"),
+        State("view", "value"),
+        State("shade","value"),
+        State("water", "value"),
+        State("trail_length", "value"),
+        State("required_eq", "value"),
+        State("weather", "value"),
+        State("crowdness", "value"),
+        State("nearby", "value"),
+        State("Entry_Fee", "value"),
+        State("how_far_from_me", "value"),
+        State("trips_list", "value"),
+        State("default-values", "data")
+    ],
+    prevent_initial_call=True 
+)
+def update_tab1(calculate_clicks, confirm_remove_trip, remove_clicks, confirm_reset, reset_clicks,
+               n_intervals, trip_name, coordinate, area, accessibility, challenge, terrain,
+               view, shade, water, trail_length, required_eq, weather, crowdness, nearby, entry_fee,
+               how_far_from_me, trips_list_value, defaults):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        raise PreventUpdate
+    
+    triggered_id = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
+    trip_count_content = dash.no_update
+    modal_content = dash.no_update
+    modal_is_open = dash.no_update
+    confirm_remove_trip_displayed = False
+    confirm_reset_displayed = False
+    trips_options = dash.no_update
+    trip_value = dash.no_update
+    
+    trp = trips_list_value
+    
+    # Read CSV
+    if os.path.exists(csv_file_path):
+        if os.path.getsize(csv_file_path) > 0:
+            df = pd.read_csv(csv_file_path, index_col=0)
+        else:
+            df = pd.DataFrame()
+    else:
+        df = pd.DataFrame()
+    
+    # If interval-component triggered, just update nothing (or do needed logic)
+    if triggered_id == 'interval-component':
+        if not df.empty:
+            trips_list = df["Trip"].to_list()
+            trips_options = [{'label': trip, 'value': trip} for trip in df["Trip"].unique()]
+            
+            if trips_list:
+                if trp in trips_list:
+                    trip_value = trp  # Keep current selection
+                else:
+                    trip_value = trips_list[0]  # Select first if current not available
+            else:
+                trip_value = None
+        else:
+            trip_value = None
+             
+        # Update the trip count
+        valid_score_count = compute_valid_score_count(df)
+        trip_count_content = f"""  
+        ### Trips Evaluation Count
+        There are **{valid_score_count}** checked trips.
+        """
+                
+        return (
+            modal_content,                     # modal-body
+            modal_is_open,                    # score-modal.is_open
+            confirm_reset_displayed,          # confirm-reset.displayed
+            trip_count_content,               # trip-count.children
+            confirm_remove_trip_displayed,    # confirm-remove_trip.displayed
+            trips_options,                    # trips_list.options
+            trip_value,                       # trips_list.value
+            dash.no_update,                   # trip_name
+            dash.no_update,                   # coordinate
+            dash.no_update,                   # area
+            dash.no_update,                   # accessibility
+            dash.no_update,                   # challenge
+            dash.no_update,                   # terrain
+            dash.no_update,                   # view
+            dash.no_update,                   # shade
+            dash.no_update,                   # water
+            dash.no_update,                   # trail_length
+            dash.no_update,                   # required_eq
+            dash.no_update,                   # weather
+            dash.no_update,                   # crowdness
+            dash.no_update,                   # nearby
+            dash.no_update,                   # Entry_Fee
+            dash.no_update                    # how_far_from_me
+        )
+
+    # Handle Reset Button Click
+    elif triggered_id == "reset-btn" and reset_clicks > 0:
+        confirm_reset_displayed = True
+        return (
+            modal_content,                     # modal-body
+            modal_is_open,                    # score-modal.is_open
+            confirm_reset_displayed,          # confirm-reset.displayed
+            trip_count_content,               # trip-count.children
+            confirm_remove_trip_displayed,    # confirm-remove_trip.displayed
+            trips_options,                    # trips_list.options
+            trip_value,
+            defaults["trip"],                 # trip_name
+            defaults["mid_trail_coordinate"],
+            defaults["area_scores"],
+            defaults["Accessibility"],
+            defaults["Challenge"],
+            defaults["terrain"],
+            defaults["view"],
+            defaults["shade"],
+            defaults["water"],
+            defaults["trail_length"],
+            defaults["required_eq"],
+            defaults["weather"],
+            defaults["crowdness"],
+            defaults["nearby_attractions"],
+            defaults["Entry_Fee"],
+            defaults["how_far_from_me"]
+        )
+
+    # Handle Confirm Reset Submission
+    elif triggered_id == "confirm_reset" and confirm_reset > 0:
+        # Clear CSV data if it exists
+        if os.path.exists(csv_file_path):
+            if not df.empty:
+                df = pd.DataFrame()
+                df.to_csv(csv_file_path, index=True)
+                modal_content = html.Div("DataFrame cleared successfully.")
+                modal_is_open = True
+                valid_score_count = compute_valid_score_count(df)
+                trip_count_content = f"""
+                ### Trips Evaluation Count
+                There are **{valid_score_count}** checked trips.
+                """ 
+                trips_options = []
+                trip_value = None
+                return (
+                    modal_content,                     # modal-body
+                    modal_is_open,                    # score-modal.is_open
+                    confirm_reset_displayed,          # confirm-reset.displayed
+                    trip_count_content,               # trip-count.children
+                    confirm_remove_trip_displayed,    # confirm-remove_trip.displayed
+                    trips_options,                    # trips_list.options
+                    trip_value,
+                    defaults["trip"],
+                    defaults["mid_trail_coordinate"],
+                    defaults["area_scores"],
+                    defaults["Accessibility"],
+                    defaults["Challenge"],
+                    defaults["terrain"],
+                    defaults["view"],
+                    defaults["shade"],
+                    defaults["water"],
+                    defaults["trail_length"],
+                    defaults["required_eq"],
+                    defaults["weather"],
+                    defaults["crowdness"],
+                    defaults["nearby_attractions"],
+                    defaults["Entry_Fee"],
+                    defaults["how_far_from_me"]
+                )
+        modal_content = "No Data to Clear."
+        modal_is_open = True
+        valid_score_count = compute_valid_score_count(df)
+        trip_count_content = f"""
+        ### Trips Evaluation Count
+        There are **{valid_score_count}** checked trips.
+        """ 
+        # Return defaults after clearing
+        return (
+            modal_content,                     # modal-body
+            modal_is_open,                    # score-modal.is_open
+            confirm_reset_displayed,          # confirm-reset.displayed
+            trip_count_content,               # trip-count.children
+            confirm_remove_trip_displayed,    # confirm-remove_trip.displayed
+            trips_options,                    # trips_list.options
+            trip_value,
+            defaults["trip"],
+            defaults["mid_trail_coordinate"],
+            defaults["area_scores"],
+            defaults["Accessibility"],
+            defaults["Challenge"],
+            defaults["terrain"],
+            defaults["view"],
+            defaults["shade"],
+            defaults["water"],
+            defaults["trail_length"],
+            defaults["required_eq"],
+            defaults["weather"],
+            defaults["crowdness"],
+            defaults["nearby_attractions"],
+            defaults["Entry_Fee"],
+            defaults["how_far_from_me"]
+        )
+
+    # Handle Remove Button Click
+    elif triggered_id == "remove_btn" and remove_clicks > 0:
+        confirm_remove_trip_displayed = True
+        # User clicked remove, no trip removed yet, just revert to defaults
+        return (
+            modal_content,                     # modal-body
+            modal_is_open,                    # score-modal.is_open
+            confirm_reset_displayed,          # confirm-reset.displayed
+            trip_count_content,               # trip-count.children
+            confirm_remove_trip_displayed,    # confirm-remove_trip.displayed
+            trips_options,                    # trips_list.options
+            trip_value,
+            defaults["trip"],
+            defaults["mid_trail_coordinate"],
+            defaults["area_scores"],
+            defaults["Accessibility"],
+            defaults["Challenge"],
+            defaults["terrain"],
+            defaults["view"],
+            defaults["shade"],
+            defaults["water"],
+            defaults["trail_length"],
+            defaults["required_eq"],
+            defaults["weather"],
+            defaults["crowdness"],
+            defaults["nearby_attractions"],
+            defaults["Entry_Fee"],
+            defaults["how_far_from_me"]
+        )
+
+    # Handle Confirm Remove Trip Submission
+    elif triggered_id == "confirm_remove_trip" and confirm_remove_trip > 0:
+        # Remove the selected trip from CSV
+        if trp is None:
+            modal_content = "No Trip Selected"
+            modal_is_open = True
+            return (
+                modal_content,                     # modal-body
+                modal_is_open,                    # score-modal.is_open
+                confirm_reset_displayed,          # confirm-reset.displayed
+                trip_count_content,               # trip-count.children
+                confirm_remove_trip_displayed,    # confirm-remove_trip.displayed
+                trips_options,                    # trips_list.options
+                trip_value,
+                defaults["trip"],
+                defaults["mid_trail_coordinate"],
+                defaults["area_scores"],
+                defaults["Accessibility"],
+                defaults["Challenge"],
+                defaults["terrain"],
+                defaults["view"],
+                defaults["shade"],
+                defaults["water"],
+                defaults["trail_length"],
+                defaults["required_eq"],
+                defaults["weather"],
+                defaults["crowdness"],
+                defaults["nearby_attractions"],
+                defaults["Entry_Fee"],
+                defaults["how_far_from_me"]
+            )
+
+        if os.path.exists(csv_file_path):
+            if not df.empty:
+                if trp in df["Trip"].values:
+                    df = df[df["Trip"] != trp]
+                    df.to_csv(csv_file_path, index=True)
+                    
+                    # Apply filtering before concatenation
+                    df_filtered = exclude_empty_all_na(df)
+                    
+                    trips_list = df_filtered["Trip"].to_list()
+                    trips_options = [{'label': trip, 'value': trip} for trip in df_filtered["Trip"].unique()]
+                    
+                    if trips_list:
+                        if trp in trips_list:
+                            trip_value = trp  # Keep current selection
+                        else:
+                            trip_value = trips_list[0]  # Select first if current not available
+                    else:
+                        trip_value = None
+
+                    # Update the trip count
+                    valid_score_count = compute_valid_score_count(df_filtered)
+                    trip_count_content = f"""  
+                    ### Trips Evaluation Count
+                    There are **{valid_score_count}** checked trips.
+                    """
+                    modal_content = f"Trip '{trip_name}' has been removed."
+                    modal_is_open = True
+                    return (
+                        modal_content,                     # modal-body
+                        modal_is_open,                    # score-modal.is_open
+                        confirm_reset_displayed,          # confirm-reset.displayed
+                        trip_count_content,               # trip-count.children
+                        confirm_remove_trip_displayed,    # confirm-remove_trip.displayed
+                        trips_options,                    # trips_list.options
+                        trip_value,
+                        defaults["trip"],
+                        defaults["mid_trail_coordinate"],
+                        defaults["area_scores"],
+                        defaults["Accessibility"],
+                        defaults["Challenge"],
+                        defaults["terrain"],
+                        defaults["view"],
+                        defaults["shade"],
+                        defaults["water"],
+                        defaults["trail_length"],
+                        defaults["required_eq"],
+                        defaults["weather"],
+                        defaults["crowdness"],
+                        defaults["nearby_attractions"],
+                        defaults["Entry_Fee"],
+                        defaults["how_far_from_me"]
+                    )
+
+        modal_content = f"Trip '{trip_name}' not found in data."
+        modal_is_open = True
+        return (
+            modal_content,                     # modal-body
+            modal_is_open,                    # score-modal.is_open
+            confirm_reset_displayed,          # confirm-reset.displayed
+            trip_count_content,               # trip-count.children
+            confirm_remove_trip_displayed,    # confirm-remove_trip.displayed
+            trips_options,                    # trips_list.options
+            trip_value,
+            defaults["trip"],
+            defaults["mid_trail_coordinate"],
+            defaults["area_scores"],
+            defaults["Accessibility"],
+            defaults["Challenge"],
+            defaults["terrain"],
+            defaults["view"],
+            defaults["shade"],
+            defaults["water"],
+            defaults["trail_length"],
+            defaults["required_eq"],
+            defaults["weather"],
+            defaults["crowdness"],
+            defaults["nearby_attractions"],
+            defaults["Entry_Fee"],
+            defaults["how_far_from_me"]
+        )
+
+    # Handle Calculate Button Click
+    elif triggered_id == "calculate-btn" and calculate_clicks > 0:
+        try:
+            scores = {
+                "Trip": trip_name_val(trip_name, df),
+                "Coordinates": mid_trail_coordinate(coordinate, df),
+                "Area": area_scores.get(area, 0),
+                "Accessibility": Accessibility.get(accessibility, 0),
+                "Challenge": Challenge.get(challenge, 0),
+                "Terrain": Terrain.get(terrain, 0),
+                "View": View.get(view, 0),
+                "Shade": Shade.get(shade, 0),
+                "Entry Fee": Entry_Fee.get(entry_fee, 0),
+                "Water": Water.get(water, 0),
+                "Nearby Attractions": Nearby_attractions.get(nearby, 0),
+                "Trail Length": Trail_length.get(trail_length, 0),
+                "How Far?": How_far_from_me.get(how_far_from_me, 0),
+                "Required EQ": Required_eq.get(required_eq, 0),
+                "Weather": Weather.get(weather, 0),
+                "Crowdness": Crowdness.get(crowdness, 0)
+            }
+
+            weighted_scores = {
+                "Area": scores["Area"] * 0.1,
+                "Accessibility": scores["Accessibility"] * 0.05,
+                "Challenge": scores["Challenge"] * 0.1,
+                "Terrain": scores["Terrain"] * 0.075,
+                "View": scores["View"] * 0.01,
+                "Shade": scores["Shade"] * 0.075,
+                "Entry Fee": scores["Entry Fee"] * 0.05,
+                "Water": scores["Water"] * 0.05,
+                "Nearby Attractions": scores["Nearby Attractions"] * 0.05,
+                "Trail Length": scores["Trail Length"] * 0.075,
+                "How Far?": scores["How Far?"] * 0.075,
+                "Required EQ": scores["Required EQ"] * 0.075,
+                "Weather": scores["Weather"] * 0.075,
+                "Crowdness": scores["Crowdness"] * 0.05
+            }
+
+            total_score = sum(weighted_scores.values())
+
+            labels = ["Trip", "Coordinates","Area","Accessibility","Challenge","Terrain","View",
+                      "Shade","Water","Trail Length","Required EQ","Weather","Crowdness","Nearby Attractions","Entry Fee","How Far?", "Total Score"]            
+            values = [trip_name, coordinate, area, accessibility, challenge, terrain, view, shade,
+                      water, trail_length, required_eq, weather, crowdness, nearby, entry_fee,
+                      how_far_from_me, total_score]
+
+            # Append to CSV
+            if os.path.exists(csv_file_path):
+                if os.path.getsize(csv_file_path) > 0:
+                    df_existing = pd.read_csv(csv_file_path, index_col=0)
+                    new_row = pd.DataFrame([values], columns=labels)
+                    
+                    # Exclude empty or all-NA columns from both DataFrames
+                    df_existing_filtered = exclude_empty_all_na(df_existing)
+                    new_row_filtered = exclude_empty_all_na(new_row)
+                    
+                    # Concatenate the filtered DataFrames
+                    df_combined = pd.concat([df_existing_filtered, new_row_filtered], ignore_index=True)
+                    df_combined.to_csv(csv_file_path, index=True)
+                else:
+                    df_new = pd.DataFrame([values], columns=labels)
+                    df_new.to_csv(csv_file_path, index=True)
+            else:
+                df_new = pd.DataFrame([values], columns=labels)
+                df_new.to_csv(csv_file_path, index=True)
+                
+            df = pd.read_csv(csv_file_path, index_col=0)  # Reload the DataFrame with index
+            df_filtered = exclude_empty_all_na(df)       # Apply filtering
+
+            # Recompute valid_score_count
+            valid_score_count = compute_valid_score_count(df_filtered)
+            trip_count_content = f"""  
+            ### Trips Evaluation Count
+            There are **{valid_score_count}** checked trips.
+            """
+            
+            trips_list = df_filtered["Trip"].to_list()
+            trips_options = [{'label': trip, 'value': trip} for trip in df_filtered["Trip"].unique()]
+
+            if trips_list:
+                if trp in trips_list:
+                    trip_value = trp  # Keep current selection
+                else:
+                    trip_value = trips_list[0]  # Select first if current not available
+            else:
+                trip_value = None
+                
+            modal_content = html.Div([
+                html.H2(f"Total Score: {total_score}"),
+                html.Ul([html.Li(f"{key}: {val}") for key, val in scores.items()])
+            ])
+            modal_is_open = True
+
+            return (
+                modal_content,                     # modal-body
+                modal_is_open,                    # score-modal.is_open
+                confirm_reset_displayed,          # confirm-reset.displayed
+                trip_count_content,               # trip-count.children
+                confirm_remove_trip_displayed,    # confirm-remove_trip.displayed
+                trips_options,                    # trips_list.options
+                trip_value,
+                defaults["trip"],
+                defaults["mid_trail_coordinate"],
+                defaults["area_scores"],
+                defaults["Accessibility"],
+                defaults["Challenge"],
+                defaults["terrain"],
+                defaults["view"],
+                defaults["shade"],
+                defaults["water"],
+                defaults["trail_length"],
+                defaults["required_eq"],
+                defaults["weather"],
+                defaults["crowdness"],
+                defaults["nearby_attractions"],
+                defaults["Entry_Fee"],
+                defaults["how_far_from_me"]
+            )
+        except ValueError as e:
+            modal_content = html.Div(f"Error: {str(e)}")
+            modal_is_open = True
+            return (
+                modal_content,                     # modal-body
+                modal_is_open,                    # score-modal.is_open
+                confirm_reset_displayed,          # confirm-reset.displayed
+                trip_count_content,               # trip-count.children
+                confirm_remove_trip_displayed,    # confirm-remove_trip.displayed
+                trips_options,                    # trips_list.options
+                trip_value,
+                defaults["trip"],
+                defaults["mid_trail_coordinate"],
+                defaults["area_scores"],
+                defaults["Accessibility"],
+                defaults["Challenge"],
+                defaults["terrain"],
+                defaults["view"],
+                defaults["shade"],
+                defaults["water"],
+                defaults["trail_length"],
+                defaults["required_eq"],
+                defaults["weather"],
+                defaults["crowdness"],
+                defaults["nearby_attractions"],
+                defaults["Entry_Fee"],
+                defaults["how_far_from_me"]
+            )
+
+    # Default return if none of the above conditions match
+    return (
+        modal_content,                     # modal-body
+        modal_is_open,                    # score-modal.is_open
+        confirm_reset_displayed,          # confirm-reset.displayed
+        trip_count_content,               # trip-count.children
+        confirm_remove_trip_displayed,    # confirm-remove_trip.displayed
+        trips_options,                    # trips_list.options
+        trip_value,        
+        dash.no_update,                   # trip_name
+        dash.no_update,                   # coordinate
+        dash.no_update,                   # area
+        dash.no_update,                   # accessibility
+        dash.no_update,                   # challenge
+        dash.no_update,                   # terrain
+        dash.no_update,                   # view
+        dash.no_update,                   # shade
+        dash.no_update,                   # water
+        dash.no_update,                   # trail_length
+        dash.no_update,                   # required_eq
+        dash.no_update,                   # weather
+        dash.no_update,                   # crowdness
+        dash.no_update,                   # nearby
+        dash.no_update,                   # Entry_Fee
+        dash.no_update                    # how_far_from_me
+    )
+
+    
+def tab2_layout():
+    return html.Div(
+        style=background_style,
+        children=[
+            dbc.Container(
+                style=container_style,
+                children=[
+                    html.H1("Trip Analysis Application", style=heading_style),
+                    html.Hr()
+			            ],
+			    ),
+		      ],
+		)
+        
+# Define the main layout with tabs
+app.layout = html.Div(
+    [
+        dcc.Tabs(
+            [
+                dcc.Tab(
+                    label='Trips Calculation',
+                    children=tab1_layout(),
+                    style=tab_style,
+                    selected_style=selected_tab_style
+                ),
+                dcc.Tab(
+                    label='Trips Analysis',
+                    children=tab2_layout(),
+                    style=tab_style,
+                    selected_style=selected_tab_style
+                )
+            ]
+        )
+    ]
+)
+
+if __name__ == "__main__":
+    app.run_server(host='100.74.93.47', port=8050, debug=True)
